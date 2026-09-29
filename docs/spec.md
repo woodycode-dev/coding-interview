@@ -1,6 +1,6 @@
 # 설계 (spec)
 
-> 상태: **D-1~D-33 확정** (2026-09-30).
+> 상태: **D-1~D-37 확정** (2026-09-30).
 > `[README]` = README에 정해진 규칙, `[스켈레톤]` = 제공 코드가 이미 정한 동작, `[프로젝트 규칙]` = CLAUDE.md 규칙.
 > 각 결정 항목은 "결정: …(이유)"로 적고, 선택하지 않은 선택지는 "대안: …" 한 줄만 남긴다.
 
@@ -251,6 +251,50 @@
 - 대안: 시각 B. 일부 동일 시각 — 정렬 2순위를 시드로 확인할 수 있지만 화면 순서가 직관적이지 않다(2순위는 백엔드 테스트에서 검증).
 - 대안: revenue-update B. 시드에 포함 — 처음부터 매출 근거가 있지만 등록 흐름 시연 재료가 사라진다.
 
+### 2.8 마이그레이션 구성
+
+| 파일 | 내용 |
+|---|---|
+| `api/migrations/0003_documents.sql` | `workspaces.description` 추가·입력, `documents` 테이블·제약·정렬 인덱스, 자료 4건 시드 |
+| `api/migrations/0004_reviews.sql` | `reviews`, `review_evidence` 테이블·복합 FK·UNIQUE |
+
+DB CHECK 제약 목록 (D-36):
+
+| 테이블 | 제약 이름 | 규칙 |
+|---|---|---|
+| `documents` | `documents_status_check` | `status IN ('ready','processing','failed')` |
+| `documents` | `documents_title_length` | `char_length(title) BETWEEN 1 AND 200` |
+| `documents` | `documents_file_name_format` | `char_length BETWEEN 1 AND 255` + `~* '^[^/\\]+\.(txt|md)$'` |
+| `documents` | `documents_content_size` | `char_length(content) >= 1` + `octet_length(content) <= 200000` |
+| `reviews` | `reviews_decision_check` | `decision IN ('satisfied','needs_information')` |
+| `reviews` | `reviews_comment_length` | `char_length(comment) BETWEEN 1 AND 2000` |
+| `reviews` | `reviews_comment_not_blank` | `comment ~ '[^[:space:]]'` |
+
+앱 오류 처리에서 제약 이름으로 분기할 수 있도록 주요 제약에는 이름을 붙였다(`reviews_one_per_criterion`, `reviews_investor_membership`, `review_evidence_*_same_workspace` 등).
+
+### D-34. 본문 최대 크기 단위
+
+결정: **200,000 바이트 (UTF-8 `octet_length`)** (D-23의 "200KB"를 십진 KB로 읽은 값이다.)
+- 대안: 204,800 바이트(200KiB) — 요청 제한 256KiB와 단위는 같지만 "200KB"라는 표기와 숫자가 달라 보인다.
+
+### D-35. 마이그레이션 파일 분할
+
+결정: **두 파일 — `0003_documents.sql`(자료), `0004_reviews.sql`(검토)** (도메인별로 읽기 쉽고 plan 단계 순서(자료 → 검토)와 맞는다.)
+- 대안: 한 파일 — 한 번에 적용되지만 자료와 검토 변경이 섞인다.
+
+### D-36. DB CHECK 범위
+
+결정: **길이·형식 + 의견 "공백만 불가"까지 DB CHECK. 제어문자·앞뒤 공백 검사는 앱에서만** (README의 "공백뿐인 의견 거부"를 DB도 보장하고, 공백 정의가 Rust와 PostgreSQL 사이에서 어긋날 수 있는 규칙은 앱 한곳에 둔다.)
+- 대안: 앱 규칙 전부를 CHECK로 — spec 문구에 가장 충실하지만 Rust `is_whitespace`와 PostgreSQL `[[:space:]]`(libc 기준) 판정이 드물게 다를 수 있다.
+- 대안: 길이·형식만 — 단순하지만 "공백뿐인 의견 거부"를 DB가 보장하지 않는다.
+
+참고: 현재 DB(`en_US.utf8`)에서 `[[:space:]]`는 전각 공백 `U+3000`도 공백으로 판정한다(검증함). 그래서 "공백만 불가" CHECK는 앱 규칙(D-24)과 같은 방향으로 동작한다.
+
+### D-37. FK 삭제 동작
+
+결정: **모든 새 FK는 기본값 `NO ACTION`** (자료·검토 삭제 기능이 범위 밖이라 삭제 연쇄 동작이 필요 없고, 실수로 삭제가 번지지 않는다.) [스켈레톤] `0002`는 `ON DELETE CASCADE`를 쓰지만 이번 테이블에는 따르지 않는다.
+- 대안: `review_evidence → reviews`만 `ON DELETE CASCADE` — 검토 삭제 시 근거가 함께 정리되지만 지금은 쓰이지 않는 동작이다.
+
 ---
 
 ## 3. API 계약
@@ -417,7 +461,7 @@
 | `criterionId` | 존재하는 기준 [README] |
 | `query`(검색) | 앞뒤 공백 제거, 빈 문자열이면 전체, **최대 100자**, `%` `_` `\`는 LIKE 이스케이프 |
 
-DB CHECK 제약도 같은 규칙으로 건다(길이는 PostgreSQL `char_length`, 코드 포인트 기준으로 일치).
+DB CHECK 제약은 길이·형식과 의견 "공백만 불가"까지만 건다(D-36, 목록은 2.8). 길이는 PostgreSQL `char_length`라 코드 포인트 기준으로 앱과 일치한다. 제어문자·앞뒤 공백 검사는 앱에서만 한다.
 
 ### D-23. 입력 규칙 수치
 
@@ -609,3 +653,7 @@ Plugin 내부 경로는 `context.location`(예: `/criteria/team`)으로 읽고 `
 | D-31 | 롤백 테스트 실패 유도 | A. 테스트 DB 트리거 |
 | D-32 | 백엔드 테스트 방식 | A. `#[sqlx::test]` + dispatch 직접 호출 |
 | D-33 | E2E 데이터 격리 | A. `make reset-db` + 누적 상태에 견디는 테스트 |
+| D-34 | 본문 최대 크기 단위 | 200,000 바이트 (`octet_length`) |
+| D-35 | 마이그레이션 파일 분할 | 두 파일 (0003 자료, 0004 검토) |
+| D-36 | DB CHECK 범위 | 길이·형식 + 의견 공백만 불가, 제어문자·앞뒤 공백은 앱에서만 |
+| D-37 | FK 삭제 동작 | 모두 NO ACTION (삭제 기능 범위 밖) |
