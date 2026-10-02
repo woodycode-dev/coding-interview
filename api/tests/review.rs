@@ -12,7 +12,7 @@ use dataroom_api::{
     types::{PluginRpcRequest, UserRole},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 fn user(id: &str, name: &str, role: UserRole) -> AuthenticatedUser {
     AuthenticatedUser {
@@ -811,4 +811,46 @@ async fn company_progress_is_forbidden_even_with_invalid_params(pool: PgPool) {
 async fn progress_rejects_unknown_params(pool: PgPool) {
     let result = call(&pool, &investor(), "getMyProgress", json!({ "extra": 1 })).await;
     assert_eq!(status_of(result), StatusCode::BAD_REQUEST);
+}
+
+// --- 9단계 보강 (spec 6.1) ---
+
+#[sqlx::test]
+async fn saved_review_and_evidence_are_committed(pool: PgPool) {
+    let saved = save(
+        &pool,
+        &investor(),
+        "team",
+        "needs_information",
+        "팀 역량 보완",
+        &["doc-team", "doc-business"],
+    )
+    .await
+    .unwrap();
+    // Opened outside the pool: sees only committed rows.
+    let mut conn = PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap();
+    let review: (String, String, String) =
+        sqlx::query_as("SELECT investor_id, decision, comment FROM reviews WHERE id = $1")
+            .bind(saved["id"].as_str().unwrap())
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(
+        review,
+        (
+            "investor-user".into(),
+            "needs_information".into(),
+            "팀 역량 보완".into()
+        )
+    );
+    let evidence: Vec<String> = sqlx::query_scalar(
+        "SELECT document_id FROM review_evidence WHERE review_id = $1 ORDER BY document_id",
+    )
+    .bind(saved["id"].as_str().unwrap())
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(evidence, ["doc-business", "doc-team"]);
 }

@@ -11,7 +11,7 @@ use dataroom_api::{
     types::{DataroomRpcRequest, UserRole},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 fn company() -> AuthenticatedUser {
     AuthenticatedUser {
@@ -466,4 +466,84 @@ async fn search_query_length_boundary(pool: PgPool) {
     )
     .await;
     assert_eq!(status_of(too_long), StatusCode::BAD_REQUEST);
+}
+
+// --- 9단계 보강 (spec 6.1) ---
+
+/// A connection opened outside the test pool, so reads see only committed data.
+async fn fresh_connection(pool: &PgPool) -> PgConnection {
+    PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn created_document_is_committed(pool: PgPool) {
+    let created = create(&pool, "커밋 확인", "commit.md", "본문 확인")
+        .await
+        .unwrap();
+    let mut conn = fresh_connection(&pool).await;
+    let row: (String, String, String, String) =
+        sqlx::query_as("SELECT title, file_name, content, status FROM documents WHERE id = $1")
+            .bind(created["id"].as_str().unwrap())
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(
+        row,
+        (
+            "커밋 확인".into(),
+            "commit.md".into(),
+            "본문 확인".into(),
+            "ready".into()
+        )
+    );
+}
+
+#[sqlx::test]
+async fn title_and_content_minimum_and_emoji_length(pool: PgPool) {
+    assert!(create(&pool, "가", "a.md", "a").await.is_ok());
+    // Code points, not UTF-16 units: an emoji is one character (D-24).
+    assert!(
+        create(&pool, &"😀".repeat(200), "a.md", "본문")
+            .await
+            .is_ok()
+    );
+    let result = create(&pool, &"😀".repeat(201), "a.md", "본문").await;
+    assert_eq!(status_of(result), StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+async fn evidence_lock_blocks_status_change_until_commit(pool: PgPool) {
+    // Hold the same lock saveReview takes on evidence documents (spec 2.6, D-21).
+    let mut holder = pool.begin().await.unwrap();
+    dataroom_api::dataroom::lock_ready_documents(
+        &mut *holder,
+        "lighthouse",
+        &["doc-business".to_string()],
+    )
+    .await
+    .unwrap();
+
+    let mut other = fresh_connection(&pool).await;
+    sqlx::query("SET lock_timeout = '200ms'")
+        .execute(&mut other)
+        .await
+        .unwrap();
+    let blocked = sqlx::query("UPDATE documents SET status = 'failed' WHERE id = 'doc-business'")
+        .execute(&mut other)
+        .await
+        .unwrap_err();
+    let code = blocked.as_database_error().and_then(|e| e.code());
+    assert_eq!(
+        code.as_deref(),
+        Some("55P03"),
+        "expected lock_not_available"
+    );
+
+    holder.rollback().await.unwrap();
+    sqlx::query("UPDATE documents SET status = 'failed' WHERE id = 'doc-business'")
+        .execute(&mut other)
+        .await
+        .unwrap();
 }
