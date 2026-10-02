@@ -1,38 +1,48 @@
-import { useQuery } from "@tanstack/react-query";
-import { scopedKey } from "@interview/plugin-sdk";
 import type { PluginProps } from "@interview/plugin-sdk/react";
-import type { ReviewHealthResponse } from "@interview/api-types/ReviewHealthResponse";
+import { PluginEnv } from "./api";
+import { DocumentView } from "./document-view";
+import { Home } from "./home";
+import { ReviewForm } from "./review-form";
+import { BackToCriteria } from "./status";
+import { textFor } from "./text";
+
+type Route =
+  | { name: "home" }
+  | { name: "criterion"; id: string }
+  | { name: "document"; id: string }
+  | { name: "notFound" };
+
+/** Plugin-internal paths come from `context.location` (e.g. `/criteria/team`). */
+function parseRoute(location: string): Route {
+  const path = location.split(/[?#]/, 1)[0];
+  let parts: string[];
+  try {
+    parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return { name: "notFound" };
+  }
+  if (parts.length === 0) return { name: "home" };
+  if (parts.length === 2 && parts[0] === "criteria") return { name: "criterion", id: parts[1] };
+  if (parts.length === 2 && parts[0] === "documents") return { name: "document", id: parts[1] };
+  return { name: "notFound" };
+}
 
 export const App: React.FC<PluginProps> = ({ host, context }) => {
-  const text =
-    context.locale === "ko"
-      ? {
-          title: "Review Plugin",
-          loading: "연결을 확인하고 있습니다.",
-          error: "Plugin API에 연결하지 못했습니다.",
-          status: "Plugin API 연결 상태",
-        }
-      : {
-          title: "Review Plugin",
-          loading: "Checking the connection.",
-          error: "Could not connect to the Plugin API.",
-          status: "Plugin API connection",
-        };
-  const health = useQuery({
-    queryKey: scopedKey(context, "review", "health"),
-    queryFn: () => host.call<ReviewHealthResponse>("health"),
-  });
-
+  const route = parseRoute(context.location);
   return (
-    <section className="rounded-lg border border-border bg-card p-6">
-      <h1 className="text-heading-4 font-semibold">{text.title}</h1>
-      {health.isPending ? <p role="status">{text.loading}</p> : null}
-      {health.isError ? <p role="alert">{text.error}</p> : null}
-      {health.data ? (
-        <p className="text-muted-foreground">
-          {text.status}: {health.data.status}
-        </p>
-      ) : null}
-    </section>
+    <PluginEnv.Provider value={{ host, context }}>
+      {route.name === "home" ? (
+        <Home />
+      ) : route.name === "criterion" ? (
+        <ReviewForm key={route.id} criterionId={route.id} />
+      ) : route.name === "document" ? (
+        <DocumentView key={route.id} documentId={route.id} />
+      ) : (
+        <div className="space-y-4">
+          <p role="alert">{textFor(context.locale).pageNotFound}</p>
+          <BackToCriteria />
+        </div>
+      )}
+    </PluginEnv.Provider>
   );
 };
