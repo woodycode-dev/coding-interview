@@ -27,6 +27,13 @@ pub enum ReviewDecision {
 }
 
 impl ReviewDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Satisfied => "satisfied",
+            Self::NeedsInformation => "needs_information",
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "satisfied" => Some(Self::Satisfied),
@@ -117,4 +124,18 @@ pub struct NoParams {}
 )]
 pub struct GetMyReviewParams {
     pub criterion_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(
+    feature = "ts-bridge",
+    derive(ts_rs::TS),
+    ts(export, export_to = "types/")
+)]
+pub struct SaveReviewParams {
+    pub criterion_id: String,
+    pub decision: ReviewDecision,
+    pub comment: String,
+    pub evidence_document_ids: Vec<String>,
 }

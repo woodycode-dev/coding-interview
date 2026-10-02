@@ -154,6 +154,36 @@ async fn create_document(
     row.try_into()
 }
 
+/// Locks evidence documents for the caller's transaction and checks they can be linked
+/// (spec 2.6, D-21). Missing or other-workspace IDs are 404 (existence is not revealed),
+/// then `processing`·`failed` documents are 400 (D-3). `ids` must be duplicate-free.
+pub async fn lock_ready_documents<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace_id: &str,
+    ids: &[String],
+) -> Result<(), ApiError> {
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM documents
+         WHERE workspace_id = $1 AND id = ANY($2)
+         FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(ids)
+    .fetch_all(executor)
+    .await
+    .map_err(ApiError::storage)?;
+    if statuses.len() != ids.len() {
+        return Err(ApiError::not_found());
+    }
+    if statuses
+        .iter()
+        .any(|status| status != DocumentStatus::Ready.as_str())
+    {
+        return Err(ApiError::invalid("Evidence documents must be ready."));
+    }
+    Ok(())
+}
+
 /// Looks up documents of one workspace by ID for other modules (spec D-21).
 /// IDs from other workspaces or unknown IDs are simply absent from the result.
 /// Sorted like the document list: `created_at DESC, id ASC` (spec D-13).

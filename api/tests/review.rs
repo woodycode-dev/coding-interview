@@ -119,7 +119,7 @@ async fn insert_review(
 
 #[sqlx::test]
 async fn workspace_mismatch_is_forbidden(pool: PgPool) {
-    for method in ["listCriteria", "listMyReviews", "getMyReview"] {
+    for method in ["listCriteria", "listMyReviews", "getMyReview", "saveReview"] {
         let result = call_in(&pool, &investor(), "other", method, json!(null)).await;
         assert_eq!(status_of(result), StatusCode::FORBIDDEN, "{method}");
     }
@@ -375,4 +375,353 @@ async fn reviews_follow_criterion_order_and_keep_their_own_evidence(pool: PgPool
         field_list(&items[1]["evidence"], "documentId"),
         ["doc-revenue"]
     );
+}
+
+// --- saveReview ---
+
+async fn save(
+    pool: &PgPool,
+    user: &AuthenticatedUser,
+    criterion_id: &str,
+    decision: &str,
+    comment: &str,
+    document_ids: &[&str],
+) -> Result<Value, ApiError> {
+    call(
+        pool,
+        user,
+        "saveReview",
+        json!({
+            "criterionId": criterion_id,
+            "decision": decision,
+            "comment": comment,
+            "evidenceDocumentIds": document_ids,
+        }),
+    )
+    .await
+}
+
+async fn count(pool: &PgPool, sql: &str) -> i64 {
+    sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+}
+
+async fn evidence_of(pool: &PgPool, criterion_id: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT e.document_id FROM review_evidence e
+         JOIN reviews r ON r.id = e.review_id
+         WHERE r.investor_id = 'investor-user' AND r.criterion_id = $1
+         ORDER BY e.document_id",
+    )
+    .bind(criterion_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn add_ready_document(pool: &PgPool, workspace_id: &str, id: &str) {
+    sqlx::query(
+        "INSERT INTO documents (id, workspace_id, title, file_name, content, status, created_by)
+         VALUES ($1, $2, $1, 'evidence.md', '본문', 'ready', 'company-user')",
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn company_cannot_save_even_with_invalid_input(pool: PgPool) {
+    for params in [
+        json!({}),
+        json!({ "criterionId": "business", "decision": "satisfied", "comment": "확인", "evidenceDocumentIds": ["doc-business"] }),
+    ] {
+        let result = call(&pool, &company(), "saveReview", params).await;
+        assert_eq!(status_of(result), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test]
+async fn save_creates_and_persists_review(pool: PgPool) {
+    let saved = save(
+        &pool,
+        &investor(),
+        "business",
+        "satisfied",
+        "  사업 모델 확인  ",
+        &["doc-business", "doc-team"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["criterionId"], "business");
+    assert_eq!(saved["decision"], "satisfied");
+    assert_eq!(saved["comment"], "사업 모델 확인");
+    assert_eq!(
+        field_list(&saved["evidence"], "documentId"),
+        ["doc-team", "doc-business"]
+    );
+
+    // Read back through a separate request (another pooled connection).
+    let loaded = call(
+        &pool,
+        &investor(),
+        "getMyReview",
+        json!({ "criterionId": "business" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded, saved);
+    let stored: (String, String) =
+        sqlx::query_as("SELECT decision, comment FROM reviews WHERE investor_id = 'investor-user'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, ("satisfied".into(), "사업 모델 확인".into()));
+}
+
+#[sqlx::test]
+async fn resave_keeps_review_identity_and_replaces_evidence(pool: PgPool) {
+    let first = save(
+        &pool,
+        &investor(),
+        "team",
+        "satisfied",
+        "처음",
+        &["doc-business", "doc-team"],
+    )
+    .await
+    .unwrap();
+    let second = save(
+        &pool,
+        &investor(),
+        "team",
+        "needs_information",
+        "수정",
+        &["doc-team"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(second["id"], first["id"]);
+    assert_eq!(second["createdAt"], first["createdAt"]);
+    assert!(second["updatedAt"].as_str().unwrap() >= first["updatedAt"].as_str().unwrap());
+    assert_eq!(second["decision"], "needs_information");
+    assert_eq!(second["comment"], "수정");
+    assert_eq!(field_list(&second["evidence"], "documentId"), ["doc-team"]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM reviews").await, 1);
+    assert_eq!(evidence_of(&pool, "team").await, ["doc-team"]);
+}
+
+#[sqlx::test]
+async fn comment_rules(pool: PgPool) {
+    let max = "가".repeat(2000);
+    let emoji_max = "😀".repeat(2000);
+    let padded_max = format!("  {max}\n");
+    for comment in [
+        "가",
+        "줄1\n\t줄2",
+        max.as_str(),
+        emoji_max.as_str(),
+        padded_max.as_str(),
+    ] {
+        let result = save(
+            &pool,
+            &investor(),
+            "business",
+            "satisfied",
+            comment,
+            &["doc-business"],
+        )
+        .await;
+        assert_eq!(
+            status_of(result),
+            StatusCode::OK,
+            "{} chars",
+            comment.chars().count()
+        );
+    }
+    let over = "가".repeat(2001);
+    let emoji_over = "😀".repeat(2001);
+    for comment in [
+        "",
+        "   ",
+        "\u{3000}\u{3000}",
+        "\n\t",
+        over.as_str(),
+        emoji_over.as_str(),
+        "a\u{0}b",
+        "a\u{7}b",
+    ] {
+        let result = save(
+            &pool,
+            &investor(),
+            "business",
+            "satisfied",
+            comment,
+            &["doc-business"],
+        )
+        .await;
+        assert_eq!(status_of(result), StatusCode::BAD_REQUEST, "{comment:?}");
+    }
+}
+
+#[sqlx::test]
+async fn evidence_id_rules(pool: PgPool) {
+    let twenty_one: Vec<String> = (1..=21).map(|n| format!("doc-{n}")).collect();
+    let twenty_one: Vec<&str> = twenty_one.iter().map(String::as_str).collect();
+    for ids in [
+        vec![],
+        vec!["doc-business", "doc-business"],
+        vec!["doc business"],
+        twenty_one,
+    ] {
+        let result = save(&pool, &investor(), "business", "satisfied", "확인", &ids).await;
+        assert_eq!(status_of(result), StatusCode::BAD_REQUEST, "{ids:?}");
+    }
+}
+
+#[sqlx::test]
+async fn invalid_decision_and_fields_are_invalid(pool: PgPool) {
+    for params in [
+        json!({ "criterionId": "business", "decision": "approved", "comment": "확인", "evidenceDocumentIds": ["doc-business"] }),
+        json!({ "criterionId": "business", "decision": "satisfied", "comment": "확인" }),
+        json!({ "criterionId": "business", "decision": "satisfied", "comment": "확인", "evidenceDocumentIds": ["doc-business"], "investorId": "investor-peer" }),
+        json!({ "criterionId": "a b", "decision": "satisfied", "comment": "확인", "evidenceDocumentIds": ["doc-business"] }),
+    ] {
+        let result = call(&pool, &investor(), "saveReview", params.clone()).await;
+        assert_eq!(status_of(result), StatusCode::BAD_REQUEST, "{params}");
+    }
+}
+
+#[sqlx::test]
+async fn missing_targets_are_not_found_and_unready_documents_invalid(pool: PgPool) {
+    sqlx::query("INSERT INTO workspaces (id, name) VALUES ('other', '다른 룸')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    add_ready_document(&pool, "other", "doc-other").await;
+    let cases: [(&str, &[&str], StatusCode); 7] = [
+        ("unknown", &["doc-business"], StatusCode::NOT_FOUND),
+        ("business", &["doc-missing"], StatusCode::NOT_FOUND),
+        ("business", &["doc-other"], StatusCode::NOT_FOUND),
+        ("business", &["doc-pipeline"], StatusCode::BAD_REQUEST),
+        ("business", &["doc-revenue"], StatusCode::BAD_REQUEST),
+        // Missing targets win over not-ready documents, whatever the order.
+        (
+            "business",
+            &["doc-pipeline", "doc-missing"],
+            StatusCode::NOT_FOUND,
+        ),
+        ("unknown", &["doc-revenue"], StatusCode::NOT_FOUND),
+    ];
+    for (criterion_id, ids, expected) in cases {
+        let result = save(&pool, &investor(), criterion_id, "satisfied", "확인", ids).await;
+        assert_eq!(status_of(result), expected, "{criterion_id} {ids:?}");
+    }
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM reviews").await, 0);
+}
+
+#[sqlx::test]
+async fn failed_save_rolls_back_to_previous_review(pool: PgPool) {
+    save(
+        &pool,
+        &investor(),
+        "business",
+        "satisfied",
+        "원래 의견",
+        &["doc-business"],
+    )
+    .await
+    .unwrap();
+    // Test-only trigger (D-31): fail the evidence INSERT after the review row was
+    // updated and the old evidence deleted in the same transaction.
+    sqlx::query(
+        "CREATE FUNCTION fail_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_evidence BEFORE INSERT ON review_evidence
+         FOR EACH ROW WHEN (NEW.document_id = 'doc-team') EXECUTE FUNCTION fail_evidence()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let result = save(
+        &pool,
+        &investor(),
+        "business",
+        "needs_information",
+        "바뀐 의견",
+        &["doc-team"],
+    )
+    .await;
+    assert_eq!(status_of(result), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let review = call(
+        &pool,
+        &investor(),
+        "getMyReview",
+        json!({ "criterionId": "business" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(review["decision"], "satisfied");
+    assert_eq!(review["comment"], "원래 의견");
+    assert_eq!(evidence_of(&pool, "business").await, ["doc-business"]);
+}
+
+#[sqlx::test]
+async fn concurrent_saves_keep_one_review_with_one_requests_evidence(pool: PgPool) {
+    for n in 1..=4 {
+        add_ready_document(&pool, "lighthouse", &format!("doc-c{n}")).await;
+    }
+    let sets: Vec<Vec<String>> = vec![
+        vec!["doc-business".into()],
+        vec!["doc-team".into(), "doc-c1".into()],
+        vec!["doc-c1".into(), "doc-c2".into(), "doc-c3".into()],
+        vec!["doc-c4".into()],
+        vec!["doc-business".into(), "doc-team".into(), "doc-c4".into()],
+        vec!["doc-c2".into()],
+        vec!["doc-c3".into(), "doc-business".into()],
+        vec!["doc-team".into()],
+    ];
+    let tasks: Vec<_> = sets
+        .iter()
+        .enumerate()
+        .map(|(n, ids)| {
+            let pool = pool.clone();
+            let params = json!({
+                "criterionId": "revenue",
+                "decision": "satisfied",
+                "comment": format!("동시 저장 {n}"),
+                "evidenceDocumentIds": ids,
+            });
+            tokio::spawn(async move { call(&pool, &investor(), "saveReview", params).await })
+        })
+        .collect();
+    for task in tasks {
+        assert_eq!(status_of(task.await.unwrap()), StatusCode::OK);
+    }
+
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM reviews").await, 1);
+    let stored = evidence_of(&pool, "revenue").await;
+    let matches_one_request = sets.iter().any(|ids| {
+        let mut ids = ids.clone();
+        ids.sort();
+        ids == stored
+    });
+    assert!(matches_one_request, "mixed evidence: {stored:?}");
+    // The stored comment belongs to the same request as the stored evidence.
+    let comment: String = sqlx::query_scalar("SELECT comment FROM reviews")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let n: usize = comment.trim_start_matches("동시 저장 ").parse().unwrap();
+    let mut expected = sets[n].clone();
+    expected.sort();
+    assert_eq!(stored, expected);
 }

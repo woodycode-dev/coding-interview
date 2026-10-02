@@ -1,6 +1,6 @@
 # 설계 (spec)
 
-> 상태: **D-1~D-52 확정** (2026-10-02).
+> 상태: **D-1~D-56 확정** (2026-10-03).
 > `[README]` = README에 정해진 규칙, `[스켈레톤]` = 제공 코드가 이미 정한 동작, `[프로젝트 규칙]` = CLAUDE.md 규칙.
 > 각 결정 항목은 "결정: …(이유)"로 적고, 선택하지 않은 선택지는 "대안: …" 한 줄만 남긴다.
 
@@ -222,9 +222,11 @@
 
 (2를 1보다 먼저 해도 된다. 입력 검증(4장)은 트랜잭션 시작 전에 끝낸다.)
 
+구현 순서(6단계 확정): 입력 검증 → BEGIN → 기준 존재 확인(없으면 404, FK 위반이 500으로 새지 않게) → 2 → 1 → 3 → 4 → 같은 트랜잭션에서 저장 결과 조회 → COMMIT. 오류 우선순위는 D-53.
+
 ### D-14. 동시 수정 충돌 처리
 
-결정: **A. 마지막 저장 우선(last-write-wins)** (README 조건인 "중복 없음·근거 섞임 없음"은 위 트랜잭션과 UNIQUE 제약만으로 충족되고 구현이 단순하다.) 다른 탭의 저장을 덮어쓸 수 있다는 점은 제출 문서의 한계에 적는다.
+결정: **A. 마지막 저장 우선(last-write-wins)** (README 조건인 "중복 없음·근거 섞임 없음"은 위 트랜잭션과 UNIQUE 제약만으로 충족되고 구현이 단순하다.) 다른 탭의 저장을 덮어쓸 수 있다는 점은 제출 문서의 한계에 적는다. 또 `updated_at = NOW()`는 트랜잭션 시작 시각이라, 동시 저장에서 마지막에 반영된 요청의 `updated_at`이 더 이를 수 있다(내용은 마지막 저장 기준으로 맞지만 시각은 단조 증가하지 않는다). 이것도 한계로 적는다.
 - 대안: B. 낙관적 잠금 + `409 conflict` — 덮어쓰기를 알려주지만 오류 종류와 충돌 UX가 추가된다.
 
 ### 2.7 시드 (새 마이그레이션)
@@ -414,7 +416,7 @@ review Plugin의 params 없는 method(`listCriteria`·`listMyReviews`)에도 같
   - `comment` 1~2000자, 공백만 불가 (D-24)
   - `evidenceDocumentIds` 1~20개, 중복 불가 (D-23)
   - 각 ID: 존재 + 같은 룸 + `ready`. 다른 룸 자료는 "없음"과 같게 취급한다(존재 비노출).
-- 오류 (D-3): 형식 400 / 없는 기준 404 / 없는 자료·다른 룸 자료 404 / `processing`·`failed` 자료 400
+- 오류 (D-3): 형식 400 / 없는 기준 404 / 없는 자료·다른 룸 자료 404 / `processing`·`failed` 자료 400. 여러 개면 기준 404 → 자료 404 → 자료 400 순 (D-53)
 - result: 저장된 `Review` (수정 시 `id`·`createdAt` 동일, `updatedAt` 갱신)
 - 동시 저장은 마지막 저장 우선 (D-14)
 
@@ -459,7 +461,7 @@ review Plugin의 params 없는 method(`listCriteria`·`listMyReviews`)에도 같
 
 - Plugin **UI**는 자료가 필요하면 `host.call("listDocuments" | "getDocument", params, { target: "dataroom" })`를 쓴다 (CLAUDE.md 규칙).
 - Plugin **서버**는 `documents` 테이블을 직접 조회하지 않는다. 저장 시 근거 검증은 본체 모듈이 제공하는 함수를 같은 트랜잭션으로 호출한다 (D-21).
-  - 예: `crate::dataroom::lock_ready_documents(tx, workspace_id, ids) -> Result<(), ApiError>` (이름은 구현 단계에서 확정)
+  - `crate::dataroom::lock_ready_documents(실행기, workspace_id, ids) -> Result<(), ApiError>` (6단계에서 이름 확정)
 
 ### D-21. Plugin 서버의 `documents` 접근
 
@@ -491,6 +493,26 @@ review Plugin의 params 없는 method(`listCriteria`·`listMyReviews`)에도 같
 결정: **저장 후 `processing`·`failed`로 바뀐 근거도 현재 상태 그대로 응답에 포함** (상태는 바뀔 수 있는 값이라 숨기면 근거가 조용히 사라진 것처럼 보인다. 화면이 상태 배지로 구분한다.) 저장 시 검증(ready만)은 그대로다.
 - 대안: ready가 아닌 근거는 응답에서 제외 — 화면이 단순하지만 저장한 근거가 사라져 보인다.
 
+### D-53. `saveReview` 오류 우선순위
+
+결정: **없는 것 먼저: 기준 404 → 없는·다른 룸 자료 404 → `processing`·`failed` 자료 400** (근거 순서를 바꿔 보내도 같은 요청이면 같은 오류가 나오고, 1.2의 "대상 존재 → 상태" 순서와 맞는다.)
+- 대안: 입력 순서대로 첫 문제 — 직관적이지만 배열 순서에 따라 응답 코드가 달라진다.
+
+### D-54. 의견 제어문자
+
+결정: **`\n` `\r` `\t`만 허용, 그 밖의 제어문자(NUL 포함)는 `400 invalid_input`** (여러 줄 의견을 쓸 수 있으면서, PostgreSQL TEXT가 저장하지 못하는 NUL이 500으로 새지 않는다.)
+- 대안: NUL만 거부 — 본문 규칙과 같고 단순하지만 보이지 않는 제어문자가 저장될 수 있다.
+
+### D-55. 근거 자료 ID 형식
+
+결정: **각 ID를 D-38 형식(1~100자, `[A-Za-z0-9-]`)으로 검사, 아니면 400** (D-38·D-49와 같은 규칙이고 형식이 틀린 ID는 잠금·조회 전에 거른다.)
+- 대안: 형식 검사 없음 — 이상한 문자열도 조회까지 가서 404가 된다.
+
+### D-56. 검토 조회의 일관성
+
+결정: **`getMyReview`·`listMyReviews`의 조회(검토 행, `review_evidence`, `document_refs`)를 `REPEATABLE READ READ ONLY` 트랜잭션 하나로 묶음** (동시 저장 중에도 옛 의견과 새 근거가 섞인 응답이 나오지 않는다.)
+- 대안: 트랜잭션 없이 조회 — 단순하지만 저장과 겹치면 섞인 응답이 나올 수 있다.
+
 ---
 
 ## 4. 입력 규칙
@@ -504,9 +526,9 @@ review Plugin의 params 없는 method(`listCriteria`·`listMyReviews`)에도 같
 | `title` | 앞뒤 공백 제거 후 **1~200자**, 제어문자 불가, trim한 값 저장 |
 | `fileName` | 앞뒤 공백 제거 후 **1~255자**, trim한 값 저장 (D-40), 확장자 `.txt`·`.md` [README] (**대소문자 무시**: `.MD`·`.Txt` 허용), `/` `\` 제어문자 불가, 확장자만 있는 이름(`.md`) 불가 |
 | `content` | UTF-8 [README] (JSON 문자열이라 서버 도착 시 이미 유효 UTF-8), **1자 이상**, **NUL(`\0`) 불가**, **최대 200KB (UTF-8 바이트)** |
-| `comment` | 1~2000자 [README], 공백만 불가 [README], **trim한 값 저장**, 공백 판정은 **Unicode 공백 전체**(`char::is_whitespace`, 전각 공백 `U+3000` 포함) |
+| `comment` | 1~2000자 [README], 공백만 불가 [README], **trim한 값 저장**, 공백 판정은 **Unicode 공백 전체**(`char::is_whitespace`, 전각 공백 `U+3000` 포함), 제어문자 불가(`\n` `\r` `\t`만 허용, D-54) |
 | `decision` | `satisfied` \| `needs_information` [README] |
-| `evidenceDocumentIds` | 1개 이상 [README], 중복 불가 [README], **최대 20개** |
+| `evidenceDocumentIds` | 1개 이상 [README], 중복 불가 [README], **최대 20개**, 각 ID는 D-38 형식 (D-55) |
 | `criterionId` | 존재하는 기준 [README] |
 | `query`(검색) | 앞뒤 공백 제거, 빈 문자열이면 전체, **최대 100자**, `%` `_` `\`는 LIKE 이스케이프 |
 
@@ -754,3 +776,7 @@ Plugin 내부 경로는 `context.location`(예: `/criteria/team`)으로 읽고 `
 | D-50 | listMyReviews 정렬 | 기준 `display_order` 순 |
 | D-51 | company listMyReviews | params 검사 전 빈 목록 |
 | D-52 | 근거 현재 상태 | 바뀐 상태 그대로 표시 |
+| D-53 | saveReview 오류 우선순위 | 기준 404 → 자료 404 → 자료 400 |
+| D-54 | 의견 제어문자 | `\n` `\r` `\t`만 허용 |
+| D-55 | 근거 자료 ID 형식 | D-38 형식 |
+| D-56 | 검토 조회 일관성 | REPEATABLE READ READ ONLY 트랜잭션 |
