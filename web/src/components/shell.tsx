@@ -82,7 +82,7 @@ export function Shell({ session }: { session: HostSession }) {
           {workspaceId !== workspace.id ? (
             <p role="alert">{t.noWorkspace}</p>
           ) : !pluginId ? (
-            <DataroomApp />
+            <DataroomApp session={session} />
           ) : catalog.isPending ? (
             <p role="status">{t.loading}</p>
           ) : catalog.isError ? (
