@@ -34,6 +34,23 @@ pub(super) struct DocumentDetailRow {
     pub(super) created_by_name: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub(super) struct DocumentRefRow {
+    pub(super) id: String,
+    pub(super) title: String,
+    pub(super) file_name: String,
+    pub(super) status: String,
+}
+
+/// Document fields other modules (the review plugin) may show for a document ID (spec D-21).
+#[derive(Debug)]
+pub struct DocumentRef {
+    pub id: String,
+    pub title: String,
+    pub file_name: String,
+    pub status: DocumentStatus,
+}
+
 fn status(value: &str) -> Result<DocumentStatus, ApiError> {
     DocumentStatus::parse(value).ok_or_else(|| ApiError::storage("Unknown document status."))
 }
@@ -67,6 +84,19 @@ impl TryFrom<DocumentDetailRow> for DocumentDetail {
                 id: row.created_by_id,
                 name: row.created_by_name,
             },
+        })
+    }
+}
+
+impl TryFrom<DocumentRefRow> for DocumentRef {
+    type Error = ApiError;
+
+    fn try_from(row: DocumentRefRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            status: status(&row.status)?,
+            id: row.id,
+            title: row.title,
+            file_name: row.file_name,
         })
     }
 }

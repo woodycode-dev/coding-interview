@@ -6,10 +6,13 @@ use crate::{
     types::{DataroomRpcRequest, RpcResponse, UserRole},
 };
 use axum::http::StatusCode;
-use models::{DOCUMENT_CREATED_AT, DataroomRow, DocumentDetailRow, DocumentSummaryRow};
+use models::{
+    DOCUMENT_CREATED_AT, DataroomRow, DocumentDetailRow, DocumentRef, DocumentRefRow,
+    DocumentSummaryRow,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use types::{
     CreateDocumentParams, DataroomInfo, DocumentDetail, DocumentStatus, DocumentSummary,
     GetDataroomParams, GetDocumentParams, ListDocumentsParams, ListDocumentsResponse,
@@ -149,6 +152,31 @@ async fn create_document(
     .await
     .map_err(ApiError::storage)?;
     row.try_into()
+}
+
+/// Looks up documents of one workspace by ID for other modules (spec D-21).
+/// IDs from other workspaces or unknown IDs are simply absent from the result.
+/// Sorted like the document list: `created_at DESC, id ASC` (spec D-13).
+pub async fn document_refs<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace_id: &str,
+    ids: &[String],
+) -> Result<Vec<DocumentRef>, ApiError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, DocumentRefRow>(
+        r#"SELECT d.id, d.title, d.file_name, d.status
+           FROM documents d
+           WHERE d.workspace_id = $1 AND d.id = ANY($2)
+           ORDER BY d.created_at DESC, d.id ASC"#,
+    )
+    .bind(workspace_id)
+    .bind(ids)
+    .fetch_all(executor)
+    .await
+    .map_err(ApiError::storage)?;
+    rows.into_iter().map(DocumentRef::try_from).collect()
 }
 
 fn to_result<T: Serialize>(value: T) -> Result<Value, ApiError> {

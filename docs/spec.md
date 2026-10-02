@@ -1,6 +1,6 @@
 # 설계 (spec)
 
-> 상태: **D-1~D-47 확정** (2026-10-02).
+> 상태: **D-1~D-52 확정** (2026-10-02).
 > `[README]` = README에 정해진 규칙, `[스켈레톤]` = 제공 코드가 이미 정한 동작, `[프로젝트 규칙]` = CLAUDE.md 규칙.
 > 각 결정 항목은 "결정: …(이유)"로 적고, 선택하지 않은 선택지는 "대안: …" 한 줄만 남긴다.
 
@@ -380,26 +380,28 @@ DB CHECK 제약 목록 (D-36):
 
 ### D-39. params가 없거나 선택인 method의 입력
 
-결정: **`getDataroom`·`listDocuments`는 `null`과 `{}`를 모두 허용, 모르는 필드는 400** (호출 측이 편하고 [스켈레톤] `host.call`의 기본값 `params ?? null`과 맞으며, 잘못 보낸 params를 조용히 무시하지 않는다.)
+결정: **`getDataroom`·`listDocuments`·`listCriteria`·`listMyReviews`는 `null`과 `{}`를 모두 허용, 모르는 필드는 400** (호출 측이 편하고 [스켈레톤] `host.call`의 기본값 `params ?? null`과 맞으며, 잘못 보낸 params를 조용히 무시하지 않는다.)
 - 대안: `getDataroom`은 params 무시 — 단순하지만 잘못된 params가 조용히 통과한다.
+
+review Plugin의 params 없는 method(`listCriteria`·`listMyReviews`)에도 같은 규칙을 적용한다 (5단계에서 확장, 본체·Plugin 규칙 일치).
 
 ### 3.2 review (Plugin, `POST /api/plugins/rpc`, `pluginId: "review"`)
 
 #### `listCriteria`
-- params: 없음
+- params: `null` 또는 `{}`. 모르는 필드가 있으면 400 (D-39)
 - result: `{ items: Criterion[] }`, `Criterion = { id, title, reviewQuestion, displayOrder }`, `display_order` 오름차순
 - 권한: 둘 다 허용 (D-20)
 
 #### `listMyReviews`
-- params: 없음
-- result: `{ items: Review[] }`. 본인 것만.
+- params: `null` 또는 `{}`. 모르는 필드가 있으면 400 (D-39)
+- result: `{ items: Review[] }`. 본인 것만. 기준 `display_order` 순 (D-50)
   - `Review = { id, criterionId, decision, comment, evidence: EvidenceRef[], createdAt, updatedAt }`
-  - `EvidenceRef = { documentId, title, fileName, status }` (자료 정렬 규칙 순, D-13)
-- company: `{ items: [] }` [README]
+  - `EvidenceRef = { documentId, title, fileName, status }` (자료 정렬 규칙 순, D-13). 근거 자료는 저장 후 상태가 바뀌었어도 현재 상태 그대로 표시 (D-52)
+- company: `{ items: [] }` [README]. params를 검사하기 전에 반환 (D-51)
 - 오류: 401, 403(D-1)
 
 #### `getMyReview`
-- params: `{ criterionId }`
+- params: `{ criterionId }` — 1~100자, `[A-Za-z0-9-]`만 허용. 아니면 400 (D-49)
 - result: `Review | null` (미작성이면 `null`)
 - company: `403` (D-6)
 - 오류: 400(형식), **404**(없는 기준, D-3)
@@ -463,6 +465,31 @@ DB CHECK 제약 목록 (D-36):
 
 결정: **B. 본체 모듈(`crate::dataroom`)에 트랜잭션을 받는 검증 함수를 두고 Plugin 서버가 호출** (자료 테이블 지식을 본체에 모으면서 검증·저장을 한 트랜잭션으로 유지한다.)
 - 대안: A. Plugin 서버가 `documents`를 직접 `SELECT … FOR SHARE` — 단순하지만 Plugin이 본체 테이블을 알게 된다.
+
+### D-48. 근거 자료 정보 조회 (D-21 확장)
+
+결정: **본체 `crate::dataroom::document_refs(실행기, workspace_id, ids)`를 호출** (Plugin은 `review_evidence`에서 자료 ID만 읽고 제목·파일명·상태는 본체에서 받는다. D-21처럼 자료 테이블 지식을 본체에 모으고, 실행기(`PgExecutor`)를 받으므로 저장 트랜잭션 안에서도 쓸 수 있다.) 다른 룸·없는 ID는 결과에서 빠지고, 결과는 자료 정렬 규칙(D-13) 순이다.
+- 대안: Plugin SQL에서 `documents` JOIN — 쿼리 1번으로 단순하지만 D-21 취지와 어긋난다.
+
+### D-49. `criterionId` 형식
+
+결정: **D-38과 같은 규칙: 1~100자, `[A-Za-z0-9-]`만, 아니면 `400 invalid_input`** (자료 ID와 기준이 같고 시드 ID(`business` 등)와 맞으며, 형식이 틀린 입력은 조회 전에 거른다.)
+- 대안: 길이만 검사 — 단순하지만 이상한 문자열도 조회까지 가서 404가 된다.
+
+### D-50. `listMyReviews` 정렬
+
+결정: **기준 `display_order` 오름차순** (기준 목록·현황 화면과 순서가 같다.)
+- 대안: `updated_at DESC` — 최근 수정순이지만 기준 화면과 순서가 달라진다.
+
+### D-51. company의 `listMyReviews` 검사 순서
+
+결정: **params를 검사하기 전에 빈 목록 반환** (1.2 순서(역할 → params)를 따른다. README가 정한 company 응답은 빈 목록이다.)
+- 대안: params를 먼저 검사해 400 — 입력 오류를 알리지만 1.2 순서와 달라진다.
+
+### D-52. 근거 자료의 현재 상태 표시
+
+결정: **저장 후 `processing`·`failed`로 바뀐 근거도 현재 상태 그대로 응답에 포함** (상태는 바뀔 수 있는 값이라 숨기면 근거가 조용히 사라진 것처럼 보인다. 화면이 상태 배지로 구분한다.) 저장 시 검증(ready만)은 그대로다.
+- 대안: ready가 아닌 근거는 응답에서 제외 — 화면이 단순하지만 저장한 근거가 사라져 보인다.
 
 ---
 
@@ -713,7 +740,7 @@ Plugin 내부 경로는 `context.location`(예: `/criteria/team`)으로 읽고 `
 | D-36 | DB CHECK 범위 | 길이·형식 + 의견 공백만 불가, 제어문자·앞뒤 공백은 앱에서만 |
 | D-37 | FK 삭제 동작 | 모두 NO ACTION (삭제 기능 범위 밖) |
 | D-38 | getDocument id 형식 | 1~100자, `[A-Za-z0-9-]`만, 아니면 400 |
-| D-39 | 선택 params 입력 | `null`·`{}` 허용, 모르는 필드 400 |
+| D-39 | 선택 params 입력 | `null`·`{}` 허용, 모르는 필드 400 (본체·review 공통) |
 | D-40 | 파일명 앞뒤 공백 | trim 후 검증, trim한 값 저장 |
 | D-41 | 오류 메시지 언어 | 영어 정적 문장 |
 | D-42 | DB CHECK 위반 | 그대로 500 storage_error |
@@ -722,3 +749,8 @@ Plugin 내부 경로는 `context.location`(예: `/criteria/team`)으로 읽고 `
 | D-45 | 등록 검증 표시 시점 | 제출 시 필드별, 파일 오류는 선택 즉시 |
 | D-46 | 목록 항목·시각 | 제목·상태·파일명·등록 시각(브라우저 시간대) |
 | D-47 | 상세 400(ID 형식) | 404와 같이 "자료를 찾을 수 없습니다" |
+| D-48 | 근거 자료 정보 조회 | 본체 `document_refs` 호출 (D-21 확장) |
+| D-49 | criterionId 형식 | D-38과 같은 규칙 |
+| D-50 | listMyReviews 정렬 | 기준 `display_order` 순 |
+| D-51 | company listMyReviews | params 검사 전 빈 목록 |
+| D-52 | 근거 현재 상태 | 바뀐 상태 그대로 표시 |
