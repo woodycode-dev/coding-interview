@@ -1,6 +1,6 @@
 # 설계 (spec)
 
-> 상태: **D-1~D-37 확정** (2026-09-30).
+> 상태: **D-1~D-42 확정** (2026-10-01).
 > `[README]` = README에 정해진 규칙, `[스켈레톤]` = 제공 코드가 이미 정한 동작, `[프로젝트 규칙]` = CLAUDE.md 규칙.
 > 각 결정 항목은 "결정: …(이유)"로 적고, 선택하지 않은 선택지는 "대안: …" 한 줄만 남긴다.
 
@@ -303,7 +303,8 @@ DB CHECK 제약 목록 (D-36):
 - method 이름은 camelCase 동사+명사 (D-8).
 - 요청 `params`는 method별 Rust 구조체로 역직렬화하고 `#[serde(deny_unknown_fields)]`를 붙인다. 역직렬화 실패는 `400 invalid_input`.
 - 응답 `result` 타입은 Rust DTO + `ts-bridge` → Gen-TS. 필드는 camelCase ([스켈레톤] 기존 DTO 관례). 시각은 ISO 8601 UTC 문자열 (D-5).
-- 오류는 1.2 순서를 따르고, [스켈레톤] 기존 `kind`만 쓴다. 규칙별로 정적 메시지를 나눈다 (D-16).
+- 오류는 1.2 순서를 따르고, [스켈레톤] 기존 `kind`만 쓴다. 규칙별로 정적 메시지를 나누고, 메시지는 영어 문장으로 쓴다 (D-16, D-41).
+- 앱 검증을 통과한 뒤 DB CHECK에 걸리면 변환하지 않고 `500 storage_error`로 둔다 (D-42).
 
 ### D-8. method 이름 규칙
 
@@ -317,15 +318,25 @@ DB CHECK 제약 목록 (D-36):
 - 대안: B. `ApiErrorBody`에 `field` 추가 — 필드 옆에 서버 오류를 표시할 수 있지만 제공 오류 타입이 바뀐다.
 - 대안: C. 새 `kind` 추가 — 화면이 kind로 분기할 수 있지만 kind가 늘어난다.
 
+### D-41. 오류 메시지 언어
+
+결정: **영어 정적 문장** (예: `"Title must be 1-200 characters."`) ([스켈레톤] `"Resource not found."` 등 기존 메시지와 일관된다. 화면의 한국어 문구는 `kind`와 클라이언트 검증으로 표시한다.)
+- 대안: 한국어 정적 문장 — 화면에 그대로 보여줄 수 있지만 기존 영어 메시지와 섞인다.
+
+### D-42. 앱 검증 통과 후 DB CHECK 위반
+
+결정: **변환하지 않고 `500 storage_error`** (앱 검증이 DB 규칙보다 넓거나 같으므로, DB CHECK 위반은 앱 버그라는 신호로 드러나야 한다.)
+- 대안: SQLSTATE `23514`를 `400 invalid_input`으로 변환 — 입력 탓이면 알맞지만 앱 버그가 입력 오류로 가려진다.
+
 ### 3.1 dataroom (본체, `POST /api/dataroom/rpc`)
 
 #### `getDataroom`
-- params: 없음 (`null`)
+- params: `null` 또는 `{}`. 모르는 필드가 있으면 400 (D-39)
 - result: `{ id, name, description }` (D-10, `description`은 `string | null`)
 - 오류: 401, 403(D-1)
 
 #### `listDocuments`
-- params: `{ query?: string }` (제목 부분 일치 검색, 4장·D-11). 상태 필터 없음 (D-17)
+- params: `null`, `{}` 또는 `{ query?: string }` (제목 부분 일치 검색, 4장·D-11). 모르는 필드가 있으면 400 (D-39). 상태 필터 없음 (D-17)
 - result: `{ items: DocumentSummary[] }`
   - `DocumentSummary = { id, title, fileName, status, createdAt }`
 - 정렬: [README] `created_at DESC, id ASC`
@@ -334,7 +345,7 @@ DB CHECK 제약 목록 (D-36):
 - 오류: 401, 403(D-1), 400(검색어 규칙 위반)
 
 #### `getDocument`
-- params: `{ id }`
+- params: `{ id }` — id는 1~100자, `[A-Za-z0-9-]`만 허용. 아니면 400 (D-38)
 - result: `DocumentDetail = { id, title, fileName, status, content, createdAt, createdBy: { id, name } }` (D-7)
 - 오류: 401, 403(D-1), 400(id 형식), **404**(없음 또는 다른 룸. 존재를 드러내지 않는다)
 
@@ -360,6 +371,17 @@ DB CHECK 제약 목록 (D-36):
 
 결정: **A. 허용 (별개 자료)** (보완 자료를 다시 올리는 흐름이 자연스럽고, 자료 삭제 기능이 없으니 잘못 올려도 다시 등록할 수 있다.)
 - 대안: B. 룸 내 제목 UNIQUE — 혼동을 막지만 보완 등록 시 제목을 바꿔야 하고 409 처리가 필요하다.
+
+### D-38. `getDocument` id 형식
+
+결정: **1~100자, `[A-Za-z0-9-]`만 허용, 아니면 `400 invalid_input`** (시드 label(`doc-business`)과 UUID 문자열을 모두 받으면서, 형식이 틀린 입력은 DB 조회 전에 거른다.)
+- 대안: 길이만 검사 — 단순하지만 이상한 문자열도 조회까지 가서 404가 된다.
+- 대안: 검사 없음 — spec의 "400(id 형식)"과 맞지 않는다.
+
+### D-39. params가 없거나 선택인 method의 입력
+
+결정: **`getDataroom`·`listDocuments`는 `null`과 `{}`를 모두 허용, 모르는 필드는 400** (호출 측이 편하고 [스켈레톤] `host.call`의 기본값 `params ?? null`과 맞으며, 잘못 보낸 params를 조용히 무시하지 않는다.)
+- 대안: `getDataroom`은 params 무시 — 단순하지만 잘못된 params가 조용히 통과한다.
 
 ### 3.2 review (Plugin, `POST /api/plugins/rpc`, `pluginId: "review"`)
 
@@ -453,7 +475,7 @@ DB CHECK 제약 목록 (D-36):
 |---|---|
 | 요청 전체 | ≤ 256KiB [스켈레톤] |
 | `title` | 앞뒤 공백 제거 후 **1~200자**, 제어문자 불가, trim한 값 저장 |
-| `fileName` | **1~255자**, 확장자 `.txt`·`.md` [README] (**대소문자 무시**: `.MD`·`.Txt` 허용), `/` `\` 제어문자 불가, 확장자만 있는 이름(`.md`) 불가 |
+| `fileName` | 앞뒤 공백 제거 후 **1~255자**, trim한 값 저장 (D-40), 확장자 `.txt`·`.md` [README] (**대소문자 무시**: `.MD`·`.Txt` 허용), `/` `\` 제어문자 불가, 확장자만 있는 이름(`.md`) 불가 |
 | `content` | UTF-8 [README] (JSON 문자열이라 서버 도착 시 이미 유효 UTF-8), **1자 이상**, **NUL(`\0`) 불가**, **최대 200KB (UTF-8 바이트)** |
 | `comment` | 1~2000자 [README], 공백만 불가 [README], **trim한 값 저장**, 공백 판정은 **Unicode 공백 전체**(`char::is_whitespace`, 전각 공백 `U+3000` 포함) |
 | `decision` | `satisfied` \| `needs_information` [README] |
@@ -469,6 +491,12 @@ DB CHECK 제약은 길이·형식과 의견 "공백만 불가"까지만 건다(D
 - 대안: 제목 100자 — 목록 표시가 안정적이지만 자유도가 낮다.
 - 대안: 확장자 소문자만 — 규칙은 단순하지만 `.MD` 파일 사용자가 불편하다.
 - 대안: 근거 개수 무제한 — 자료 수만큼 허용되지만 요청 크기 상한이 불명확하다.
+
+### D-40. 파일명 앞뒤 공백
+
+결정: **trim 후 검증하고 trim한 값을 저장** (제목과 같은 규칙이라 일관되고, `" a.md"`처럼 보이지 않는 차이가 생기지 않는다.)
+- 대안: 앞뒤 공백이 있으면 400 — 원본을 보존하지만 얻는 이득이 작다.
+- 대안: 그대로 저장 — 단순하지만 보이지 않는 차이가 남는다.
 
 ### D-24. 의견 길이·공백 기준
 
@@ -657,3 +685,8 @@ Plugin 내부 경로는 `context.location`(예: `/criteria/team`)으로 읽고 `
 | D-35 | 마이그레이션 파일 분할 | 두 파일 (0003 자료, 0004 검토) |
 | D-36 | DB CHECK 범위 | 길이·형식 + 의견 공백만 불가, 제어문자·앞뒤 공백은 앱에서만 |
 | D-37 | FK 삭제 동작 | 모두 NO ACTION (삭제 기능 범위 밖) |
+| D-38 | getDocument id 형식 | 1~100자, `[A-Za-z0-9-]`만, 아니면 400 |
+| D-39 | 선택 params 입력 | `null`·`{}` 허용, 모르는 필드 400 |
+| D-40 | 파일명 앞뒤 공백 | trim 후 검증, trim한 값 저장 |
+| D-41 | 오류 메시지 언어 | 영어 정적 문장 |
+| D-42 | DB CHECK 위반 | 그대로 500 storage_error |
