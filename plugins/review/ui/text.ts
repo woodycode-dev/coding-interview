@@ -27,7 +27,6 @@ const ko = {
   viewDocument: "보기",
   save: "저장",
   saving: "저장 중입니다.",
-  saved: "저장했습니다.",
   lastSaved: "마지막 저장",
   decisionRequired: "판단을 선택해주세요.",
   commentBlank: "의견을 입력해주세요. 공백만으로는 저장할 수 없습니다.",
@@ -47,6 +46,11 @@ const ko = {
   statusReady: "준비 완료",
   statusProcessing: "처리 중",
   statusFailed: "처리 실패",
+  progressHeading: "내 검토 현황",
+  progressNotice: "개인 검토 진행 상태이며 회사 전체의 합의나 투자 승인이 아닙니다.",
+  written: "작성",
+  unwritten: "미작성",
+  savedCriterion: "저장했습니다:",
 };
 
 export type Text = Record<keyof typeof ko, string>;
@@ -79,7 +83,6 @@ const en: Text = {
   viewDocument: "View",
   save: "Save",
   saving: "Saving…",
-  saved: "Saved.",
   lastSaved: "Last saved",
   decisionRequired: "Choose a decision.",
   commentBlank: "Enter a comment. Whitespace only is not allowed.",
@@ -100,6 +103,12 @@ const en: Text = {
   statusReady: "Ready",
   statusProcessing: "Processing",
   statusFailed: "Failed",
+  progressHeading: "My review progress",
+  progressNotice:
+    "This is your personal review progress, not a company-wide agreement or investment approval.",
+  written: "Written",
+  unwritten: "Not written",
+  savedCriterion: "Saved:",
 };
 
 export function textFor(locale: Locale): Text {

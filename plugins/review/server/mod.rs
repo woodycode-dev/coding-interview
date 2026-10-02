@@ -15,7 +15,8 @@ use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use types::{
     Criterion, EvidenceRef, GetMyReviewParams, ListCriteriaResponse, ListMyReviewsResponse,
-    NoParams, Review, ReviewHealthResponse, SaveReviewParams,
+    MyProgressResponse, NoParams, ProgressItem, Review, ReviewDecision, ReviewHealthResponse,
+    SaveReviewParams,
 };
 
 pub const ID: &str = "review";
@@ -41,6 +42,7 @@ pub async fn dispatch(
         "listMyReviews" => to_result(list_my_reviews(pool, user, request.params).await?),
         "getMyReview" => to_result(get_my_review(pool, user, request.params).await?),
         "saveReview" => to_result(save_review(pool, user, request.params).await?),
+        "getMyProgress" => to_result(get_my_progress(pool, user, request.params).await?),
         _ => Err(ApiError::invalid("Unknown method.")),
     }?;
     Ok(RpcResponse { result })
@@ -48,16 +50,9 @@ pub async fn dispatch(
 
 async fn list_criteria(pool: &PgPool, params: Value) -> Result<ListCriteriaResponse, ApiError> {
     let _: NoParams = parse_optional_params(params)?;
-    let rows = sqlx::query_as::<_, CriterionRow>(
-        "SELECT id, title, review_question, display_order
-         FROM review_criteria
-         ORDER BY display_order ASC",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(ApiError::storage)?;
+    let mut conn = pool.acquire().await.map_err(ApiError::storage)?;
     Ok(ListCriteriaResponse {
-        items: rows.into_iter().map(Criterion::from).collect(),
+        items: find_criteria(&mut conn).await?,
     })
 }
 
@@ -72,22 +67,60 @@ async fn list_my_reviews(
     }
     let _: NoParams = parse_optional_params(params)?;
     let mut tx = begin_read(pool).await?;
-    let rows = sqlx::query_as::<_, ReviewRow>(&format!(
-        r#"SELECT r.id, r.criterion_id, r.decision, r.comment,
-                  {REVIEW_TIMESTAMPS}
-           FROM reviews r
-           JOIN review_criteria c ON c.id = r.criterion_id
-           WHERE r.workspace_id = $1 AND r.investor_id = $2
-           ORDER BY c.display_order ASC"#
-    ))
-    .bind(&user.workspace_id)
-    .bind(&user.id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(ApiError::storage)?;
-    let items = with_evidence(&mut tx, &user.workspace_id, rows).await?;
+    let items = find_reviews(&mut tx, user).await?;
     tx.commit().await.map_err(ApiError::storage)?;
     Ok(ListMyReviewsResponse { items })
+}
+
+async fn get_my_progress(
+    pool: &PgPool,
+    user: &AuthenticatedUser,
+    params: Value,
+) -> Result<MyProgressResponse, ApiError> {
+    // Reject before reading params (spec 1.2, D-6).
+    if !matches!(user.role, UserRole::Investor) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Only investors can view their progress.",
+        ));
+    }
+    let _: NoParams = parse_optional_params(params)?;
+    // Criteria and reviews from one snapshot (D-56).
+    let mut tx = begin_read(pool).await?;
+    let criteria = find_criteria(&mut tx).await?;
+    let mut reviews = find_reviews(&mut tx, user).await?;
+    tx.commit().await.map_err(ApiError::storage)?;
+
+    let items: Vec<ProgressItem> = criteria
+        .into_iter()
+        .map(|criterion| {
+            let review = reviews
+                .iter()
+                .position(|review| review.criterion_id == criterion.id)
+                .map(|index| reviews.swap_remove(index));
+            ProgressItem { criterion, review }
+        })
+        .collect();
+    let count = |decision: ReviewDecision| {
+        items
+            .iter()
+            .filter(|item| item.review.as_ref().is_some_and(|r| r.decision == decision))
+            .count() as u32
+    };
+    let satisfied_count = count(ReviewDecision::Satisfied);
+    let needs_information_count = count(ReviewDecision::NeedsInformation);
+    let total_count = items.len() as u32;
+    // `needs_information` is written but not satisfied (README).
+    let written_count = satisfied_count + needs_information_count;
+    Ok(MyProgressResponse {
+        total_count,
+        written_count,
+        unwritten_count: total_count - written_count,
+        satisfied_count,
+        needs_information_count,
+        items,
+    })
 }
 
 async fn get_my_review(
@@ -190,6 +223,39 @@ async fn begin_read(pool: &PgPool) -> Result<Transaction<'static, Postgres>, Api
         .await
         .map_err(ApiError::storage)?;
     Ok(tx)
+}
+
+async fn find_criteria(conn: &mut PgConnection) -> Result<Vec<Criterion>, ApiError> {
+    let rows = sqlx::query_as::<_, CriterionRow>(
+        "SELECT id, title, review_question, display_order
+         FROM review_criteria
+         ORDER BY display_order ASC",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(ApiError::storage)?;
+    Ok(rows.into_iter().map(Criterion::from).collect())
+}
+
+/// The investor's reviews in criterion order (D-50).
+async fn find_reviews(
+    conn: &mut PgConnection,
+    user: &AuthenticatedUser,
+) -> Result<Vec<Review>, ApiError> {
+    let rows = sqlx::query_as::<_, ReviewRow>(&format!(
+        r#"SELECT r.id, r.criterion_id, r.decision, r.comment,
+                  {REVIEW_TIMESTAMPS}
+           FROM reviews r
+           JOIN review_criteria c ON c.id = r.criterion_id
+           WHERE r.workspace_id = $1 AND r.investor_id = $2
+           ORDER BY c.display_order ASC"#
+    ))
+    .bind(&user.workspace_id)
+    .bind(&user.id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(ApiError::storage)?;
+    with_evidence(conn, &user.workspace_id, rows).await
 }
 
 async fn criterion_exists(conn: &mut PgConnection, id: &str) -> Result<bool, ApiError> {

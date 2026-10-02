@@ -139,3 +139,32 @@ pub struct SaveReviewParams {
     pub comment: String,
     pub evidence_document_ids: Vec<String>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(
+    feature = "ts-bridge",
+    derive(ts_rs::TS),
+    ts(export, export_to = "types/")
+)]
+pub struct ProgressItem {
+    pub criterion: Criterion,
+    pub review: Option<Review>,
+}
+
+/// Counts come from the investor's own reviews only, never from documents (README).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(
+    feature = "ts-bridge",
+    derive(ts_rs::TS),
+    ts(export, export_to = "types/")
+)]
+pub struct MyProgressResponse {
+    pub total_count: u32,
+    pub written_count: u32,
+    pub unwritten_count: u32,
+    pub satisfied_count: u32,
+    pub needs_information_count: u32,
+    pub items: Vec<ProgressItem>,
+}

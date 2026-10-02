@@ -130,8 +130,6 @@ function ReviewEditor({
     comment?: TextKey;
     evidence?: TextKey;
   }>({});
-  const [lastSaved, setLastSaved] = useState<string | null>(review?.updatedAt ?? null);
-  const [justSaved, setJustSaved] = useState(false);
   const pending = save.isPending;
 
   function toggle(documentId: string, checked: boolean) {
@@ -148,7 +146,6 @@ function ReviewEditor({
       evidence: validateEvidence(selected) ?? undefined,
     };
     setErrors(next);
-    setJustSaved(false);
     if (next.decision) decisionRef.current?.focus();
     else if (next.comment) commentRef.current?.focus();
     else if (next.evidence) evidenceRef.current?.querySelector<HTMLInputElement>("input")?.focus();
@@ -156,12 +153,8 @@ function ReviewEditor({
     save.mutate(
       { criterionId: criterion.id, decision, comment, evidenceDocumentIds: selected },
       {
-        onSuccess: (saved) => {
-          setComment(saved.comment);
-          setSelected(saved.evidence.map((evidence) => evidence.documentId));
-          setLastSaved(saved.updatedAt);
-          setJustSaved(true);
-        },
+        // Progress is already invalidated; show it with this criterion marked as saved.
+        onSuccess: (saved) => host.navigate(`/?saved=${encodeURIComponent(saved.criterionId)}`),
         onError: (error) => {
           // Document statuses may have changed; show the current ones.
           const status = errorStatus(error);
@@ -327,10 +320,11 @@ function ReviewEditor({
         <Button type="submit" disabled={pending} className="min-h-11">
           {pending ? text.saving : text.save}
         </Button>
-        <p role="status" className="text-muted-foreground">
-          {justSaved ? `${text.saved} ` : ""}
-          {lastSaved ? `${text.lastSaved}: ${formatDateTime(lastSaved, context.locale)}` : ""}
-        </p>
+        {review ? (
+          <p className="text-muted-foreground">
+            {text.lastSaved}: {formatDateTime(review.updatedAt, context.locale)}
+          </p>
+        ) : null}
       </div>
     </form>
   );

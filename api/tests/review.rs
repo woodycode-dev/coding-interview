@@ -119,7 +119,13 @@ async fn insert_review(
 
 #[sqlx::test]
 async fn workspace_mismatch_is_forbidden(pool: PgPool) {
-    for method in ["listCriteria", "listMyReviews", "getMyReview", "saveReview"] {
+    for method in [
+        "listCriteria",
+        "listMyReviews",
+        "getMyReview",
+        "saveReview",
+        "getMyProgress",
+    ] {
         let result = call_in(&pool, &investor(), "other", method, json!(null)).await;
         assert_eq!(status_of(result), StatusCode::FORBIDDEN, "{method}");
     }
@@ -724,4 +730,85 @@ async fn concurrent_saves_keep_one_review_with_one_requests_evidence(pool: PgPoo
     let mut expected = sets[n].clone();
     expected.sort();
     assert_eq!(stored, expected);
+}
+
+// --- getMyProgress ---
+
+#[sqlx::test]
+async fn progress_with_no_reviews_is_all_unwritten_despite_documents(pool: PgPool) {
+    // Seed documents exist, but progress comes from reviews only (README).
+    let progress = call(&pool, &investor(), "getMyProgress", json!(null))
+        .await
+        .unwrap();
+    assert_eq!(progress["totalCount"], 3);
+    assert_eq!(progress["writtenCount"], 0);
+    assert_eq!(progress["unwrittenCount"], 3);
+    assert_eq!(progress["satisfiedCount"], 0);
+    assert_eq!(progress["needsInformationCount"], 0);
+    let items = progress["items"].as_array().unwrap();
+    let criteria: Vec<&str> = items
+        .iter()
+        .map(|item| item["criterion"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(criteria, ["business", "team", "revenue"]);
+    assert!(items.iter().all(|item| item["review"].is_null()));
+}
+
+#[sqlx::test]
+async fn needs_information_counts_as_written_but_not_satisfied(pool: PgPool) {
+    save(
+        &pool,
+        &investor(),
+        "business",
+        "satisfied",
+        "확인",
+        &["doc-business"],
+    )
+    .await
+    .unwrap();
+    save(
+        &pool,
+        &investor(),
+        "revenue",
+        "needs_information",
+        "보완 필요",
+        &["doc-team"],
+    )
+    .await
+    .unwrap();
+    // Another investor's review must not change these counts.
+    save(&pool, &peer(), "team", "satisfied", "동료", &["doc-team"])
+        .await
+        .unwrap();
+
+    let progress = call(&pool, &investor(), "getMyProgress", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(progress["totalCount"], 3);
+    assert_eq!(progress["writtenCount"], 2);
+    assert_eq!(progress["unwrittenCount"], 1);
+    assert_eq!(progress["satisfiedCount"], 1);
+    assert_eq!(progress["needsInformationCount"], 1);
+    let items = &progress["items"];
+    assert_eq!(items[0]["review"]["decision"], "satisfied");
+    assert!(items[1]["review"].is_null());
+    assert_eq!(items[2]["review"]["decision"], "needs_information");
+    assert_eq!(
+        field_list(&items[2]["review"]["evidence"], "documentId"),
+        ["doc-team"]
+    );
+}
+
+#[sqlx::test]
+async fn company_progress_is_forbidden_even_with_invalid_params(pool: PgPool) {
+    for params in [json!(null), json!({ "extra": 1 })] {
+        let result = call(&pool, &company(), "getMyProgress", params).await;
+        assert_eq!(status_of(result), StatusCode::FORBIDDEN);
+    }
+}
+
+#[sqlx::test]
+async fn progress_rejects_unknown_params(pool: PgPool) {
+    let result = call(&pool, &investor(), "getMyProgress", json!({ "extra": 1 })).await;
+    assert_eq!(status_of(result), StatusCode::BAD_REQUEST);
 }

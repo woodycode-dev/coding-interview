@@ -9,6 +9,7 @@ import {
 import type { DocumentDetail } from "@interview/api-types/DocumentDetail";
 import type { ListCriteriaResponse } from "@interview/api-types/ListCriteriaResponse";
 import type { ListDocumentsResponse } from "@interview/api-types/ListDocumentsResponse";
+import type { MyProgressResponse } from "@interview/api-types/MyProgressResponse";
 import type { Review } from "@interview/api-types/Review";
 import type { SaveReviewParams } from "@interview/api-types/SaveReviewParams";
 
@@ -26,6 +27,7 @@ const keys = {
   mine: (context: PluginContext) => scopedKey(context, "review", "mine"),
   myReview: (context: PluginContext, criterionId: string) =>
     [...keys.mine(context), "review", criterionId] as const,
+  myProgress: (context: PluginContext) => [...keys.mine(context), "progress"] as const,
   documents: (context: PluginContext) => scopedKey(context, "review", "documents"),
   document: (context: PluginContext, id: string) =>
     [...keys.documents(context), "detail", id] as const,
@@ -48,6 +50,15 @@ export function useMyReview(criterionId: string) {
   return useQuery({
     queryKey: keys.myReview(context, criterionId),
     queryFn: ({ signal }) => host.call<Review | null>("getMyReview", { criterionId }, { signal }),
+  });
+}
+
+// Invalidated together with every "mine" key after a save.
+export function useMyProgress() {
+  const { host, context } = usePluginEnv();
+  return useQuery({
+    queryKey: keys.myProgress(context),
+    queryFn: ({ signal }) => host.call<MyProgressResponse>("getMyProgress", null, { signal }),
   });
 }
 
